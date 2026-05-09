@@ -22,6 +22,8 @@ var color VOL_COLOR   = #9c27b0
 // 1. Opening Range
 int orbTimeInput      = input.int(5, "ORB Duration (Mins)", minval = 1, group = GRP_ORB)
 string sessionInput   = input.session("0930-1600", "Trading Session", group = GRP_ORB)
+string timezoneInput  = input.string("UTC-5", "Session Timezone", options=["UTC-5", "UTC-4", "UTC+0", "UTC+1", "UTC+2", "UTC+8", "UTC+9", "Exchange"], group = GRP_ORB, tooltip = "Set this to match your local market time (e.g., UTC-5 for New York Standard Time).")
+bool showSession      = input.bool(true, "Shade Active Session", group = GRP_ORB)
 
 // 2. Gann Filter
 bool useGannFilter    = input.bool(true, "Use Gann Hi-Lo Filter", group = GRP_GANN)
@@ -44,35 +46,52 @@ float pointValueInput = input.float(0.01, "Point Value", minval = 0.00001, group
 int maxTradesInput    = input.int(5, "Max Trades Per Session", minval = 1, group = GRP_RISK)
 bool useCircuitBreaker = input.bool(true, "9th Commandment (3 Losses Stop)", group = GRP_RISK)
 
-// 6. Dashboard
+// 6. Visual Aids
+var string GRP_VIS = "6. Extra Visual Aids"
+bool showORBExt   = input.bool(true, "Extend ORB Lines", group = GRP_VIS)
+bool showLabels   = input.bool(true, "Show Signal Labels", group = GRP_VIS)
+bool showPriceInfo = input.bool(true, "Show Price Dist. on Labels", group = GRP_VIS)
+
+// 7. Dashboard
 bool showCommandments = input.bool(true, "Show Commandments Table", group = GRP_CMD)
+bool showSessionStats = input.bool(true, "Show Session High/Low on Dashboard", group = GRP_CMD)
 string tablePosInput  = input.string("Bottom Right", "Table Position", options = ["Top Right", "Bottom Right", "Top Left", "Bottom Left"], group = GRP_CMD)
 
 // --- Logic ---
 var float orbHigh = na
 var float orbLow  = na
+var float sessionHigh = na
+var float sessionLow = na
 var int totalTradesToday = 0
 var int totalLossesToday = 0
 var bool circuitBroken = false
 var int lastExitBar = 0
 
-// Detect new session
-isNewSession = time("D", sessionInput) != time("D", sessionInput)[1]
+// Time and Session Logic
+tz = timezoneInput == "Exchange" ? syminfo.timezone : timezoneInput
+isNewSession = time("D", sessionInput, tz) != time("D", sessionInput, tz)[1]
+isInSession  = not na(time(timeframe.period, sessionInput, tz))
 var int sessionStartTime = 0
 
 if isNewSession
     sessionStartTime := time
     orbHigh := na
     orbLow := na
+    sessionHigh := na
+    sessionLow := na
     totalTradesToday := 0
     totalLossesToday := 0
     circuitBroken := false
 
-// Capture Opening Range
+// Capture Opening Range & Session Extremes
 elapsedMinutes = (time - sessionStartTime) / 60000
 if elapsedMinutes >= 0 and elapsedMinutes < orbTimeInput
     orbHigh := na(orbHigh) ? high : math.max(orbHigh, high)
     orbLow  := na(orbLow) ? low : math.min(orbLow, low)
+
+if isInSession
+    sessionHigh := na(sessionHigh) ? high : math.max(sessionHigh, high)
+    sessionLow := na(sessionLow) ? low : math.min(sessionLow, low)
 
 // --- Gann Filter ---
 float gannH = ta.sma(high, gannLength)
@@ -134,6 +153,11 @@ if longSignal or shortSignal
     currentStop   := longSignal ? entryPrice - (stopPointsInput * pointValueInput) : entryPrice + (stopPointsInput * pointValueInput)
     currentTarget := longSignal ? entryPrice + (targetPointsInput * pointValueInput) : entryPrice - (targetPointsInput * pointValueInput)
 
+// --- Alerts ---
+alertcondition(longSignal, title="Borsellino BUY", message="Lewis Borsellino BUY Signal: {{ticker}} @ {{close}} | TP: {{plot('Target')}} | SL: {{plot('Stop')}}")
+alertcondition(shortSignal, title="Borsellino SELL", message="Lewis Borsellino SELL Signal: {{ticker}} @ {{close}} | TP: {{plot('Target')}} | SL: {{plot('Stop')}}")
+alertcondition(circuitBroken and not circuitBroken[1], title="Circuit Breaker Active", message="Trading halted: 3 losses reached for the session.")
+
 if isNewSession
     entryPrice := na
     currentStop := na
@@ -141,8 +165,13 @@ if isNewSession
     activeDir := 0
 
 // --- Visuals ---
-pOrbH = plot(orbHigh, "ORB High", color.new(BULL_COLOR, 30), 2, plot.style_linebr)
-pOrbL = plot(orbLow, "ORB Low", color.new(BEAR_COLOR, 30), 2, plot.style_linebr)
+bgcolor(showSession and isInSession ? color.new(NEUT_COLOR, 95) : na, title="Session Background")
+
+orbColorH = isInSession or showORBExt ? color.new(BULL_COLOR, 30) : na
+orbColorL = isInSession or showORBExt ? color.new(BEAR_COLOR, 30) : na
+
+pOrbH = plot(orbHigh, "ORB High", orbColorH, 2, plot.style_linebr)
+pOrbL = plot(orbLow, "ORB Low", orbColorL, 2, plot.style_linebr)
 fill(pOrbH, pOrbL, color.new(NEUT_COLOR, 90), "ORB Zone")
 
 plot(showGannLines ? (gannBullish ? gannL : gannH) : na, "Gann Filter", gannBullish ? GANN_BULL : GANN_BEAR, 2, plot.style_linebr)
@@ -156,19 +185,21 @@ pSL    = plot(activeDir != 0 ? currentStop : na, "Stop", color.new(BEAR_COLOR, 2
 fill(pEntry, pTP, color.new(BULL_COLOR, 85), "TP Zone")
 fill(pEntry, pSL, color.new(BEAR_COLOR, 85), "SL Zone")
 
-plotshape(longSignal, "BUY", shape.triangleup, location.belowbar, BULL_COLOR, 0, "BUY", chart.fg_color, size = size.small)
-plotshape(shortSignal, "SELL", shape.triangledown, location.abovebar, BEAR_COLOR, 0, "SELL", chart.fg_color, size = size.small)
+plotshape(longSignal and showLabels, "BUY", shape.triangleup, location.belowbar, BULL_COLOR, 0, "BUY", chart.fg_color, size = size.small)
+plotshape(shortSignal and showLabels, "SELL", shape.triangledown, location.abovebar, BEAR_COLOR, 0, "SELL", chart.fg_color, size = size.small)
 
-if longSignal
-    label.new(bar_index, currentTarget, "TP: " + str.tostring(currentTarget, format.mintick), color=BULL_COLOR, textcolor=color.white, style=label.style_label_down, size=size.small)
+if longSignal and showLabels
+    txt = "TP: " + str.tostring(currentTarget, format.mintick) + (showPriceInfo ? "\nDist: " + str.tostring(targetPointsInput) + " pts" : "")
+    label.new(bar_index, currentTarget, txt, color=BULL_COLOR, textcolor=color.white, style=label.style_label_down, size=size.small)
     label.new(bar_index, currentStop, "SL: " + str.tostring(currentStop, format.mintick), color=BEAR_COLOR, textcolor=color.white, style=label.style_label_up, size=size.small)
-if shortSignal
-    label.new(bar_index, currentTarget, "TP: " + str.tostring(currentTarget, format.mintick), color=BULL_COLOR, textcolor=color.white, style=label.style_label_up, size=size.small)
+if shortSignal and showLabels
+    txt = "TP: " + str.tostring(currentTarget, format.mintick) + (showPriceInfo ? "\nDist: " + str.tostring(targetPointsInput) + " pts" : "")
+    label.new(bar_index, currentTarget, txt, color=BULL_COLOR, textcolor=color.white, style=label.style_label_up, size=size.small)
     label.new(bar_index, currentStop, "SL: " + str.tostring(currentStop, format.mintick), color=BEAR_COLOR, textcolor=color.white, style=label.style_label_down, size=size.small)
 
 // Dashboard
 if showCommandments and barstate.islast
-    var table cmdTable = table.new(tablePosInput == "Top Right" ? position.top_right : tablePosInput == "Bottom Right" ? position.bottom_right : tablePosInput == "Top Left" ? position.top_left : position.bottom_left, 2, 15, color.new(chart.bg_color, 10), chart.fg_color, 1, chart.fg_color, 1)
+    var table cmdTable = table.new(tablePosInput == "Top Right" ? position.top_right : tablePosInput == "Bottom Right" ? position.bottom_right : tablePosInput == "Top Left" ? position.top_left : position.bottom_left, 2, 16, color.new(chart.bg_color, 10), chart.fg_color, 1, chart.fg_color, 1)
     table.cell(cmdTable, 0, 0, "Lewis Borsellino's Suite", bgcolor = NEUT_COLOR, text_color = color.white, text_size = size.small)
     table.merge_cells(cmdTable, 0, 0, 1, 0)
     statusColor = circuitBroken ? BEAR_COLOR : (activeDir != 0 ? NEUT_COLOR : BULL_COLOR)
@@ -176,7 +207,10 @@ if showCommandments and barstate.islast
     table.cell(cmdTable, 1, 1, circuitBroken ? "BREAK REQUIRED" : (activeDir != 0 ? "IN TRADE" : "READY"), bgcolor = statusColor, text_color = color.white, text_size = size.tiny)
 
     table.cell(cmdTable, 0, 2, "Stats", bgcolor = NEUT_COLOR, text_color = color.white, text_size = size.tiny)
-    table.cell(cmdTable, 1, 2, "Trades: " + str.tostring(totalTradesToday) + " | Losses: " + str.tostring(totalLossesToday), bgcolor = NEUT_COLOR, text_color = color.white, text_size = size.tiny)
+    statsStr = "Trades: " + str.tostring(totalTradesToday) + " | Losses: " + str.tostring(totalLossesToday)
+    if showSessionStats
+        statsStr += "\nHigh: " + str.tostring(sessionHigh, format.mintick) + " | Low: " + str.tostring(sessionLow, format.mintick)
+    table.cell(cmdTable, 1, 2, statsStr, bgcolor = NEUT_COLOR, text_color = color.white, text_size = size.tiny)
 
     table.cell(cmdTable, 0, 3, "1", text_size = size.tiny)
     table.cell(cmdTable, 1, 3, "Trade for success, not for money", text_size = size.tiny, text_halign = text.align_left)
