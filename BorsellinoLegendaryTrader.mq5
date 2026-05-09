@@ -44,7 +44,7 @@ datetime lastResetDay = 0;
 CTrade trade;
 
 // --- Indicator Handles ---
-int handleGannH, handleGannL, handleVolMA;
+int handleGannH, handleGannL, handleVolMA, handleVol;
 
 //+------------------------------------------------------------------+
 //| Expert initialization function                                   |
@@ -53,9 +53,12 @@ int OnInit()
 {
    handleGannH = iMA(_Symbol, _Period, InpGannPeriod, 0, MODE_SMA, PRICE_HIGH);
    handleGannL = iMA(_Symbol, _Period, InpGannPeriod, 0, MODE_SMA, PRICE_LOW);
-   handleVolMA = iMA(_Symbol, _Period, InpVolMA, 0, MODE_SMA, TICK_VOLUME);
 
-   if(handleGannH == INVALID_HANDLE || handleGannL == INVALID_HANDLE || handleVolMA == INVALID_HANDLE)
+   handleVol = iVolumes(_Symbol, _Period, VOLUME_TICK);
+   handleVolMA = iMA(_Symbol, _Period, InpVolMA, 0, MODE_SMA, handleVol);
+
+   if(handleGannH == INVALID_HANDLE || handleGannL == INVALID_HANDLE ||
+      handleVol == INVALID_HANDLE || handleVolMA == INVALID_HANDLE)
    {
       Print("Error creating indicator handles");
       return(INIT_FAILED);
@@ -74,6 +77,7 @@ void OnDeinit(const int reason)
    IndicatorRelease(handleGannH);
    IndicatorRelease(handleGannL);
    IndicatorRelease(handleVolMA);
+   IndicatorRelease(handleVol);
 }
 
 //+------------------------------------------------------------------+
