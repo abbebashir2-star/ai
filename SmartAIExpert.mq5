@@ -5,7 +5,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2024, Trading AI"
 #property link      "https://www.mql5.com"
-#property version   "1.00"
+#property version   "1.20"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -16,6 +16,7 @@ input double InpLotSize = 0.10;         // Lot Size
 input int    InpATRPeriod = 14;         // ATR Period for SL/TP
 input double InpSLMultiplier = 1.5;     // SL ATR Multiplier
 input double InpTPMultiplier = 3.0;     // TP ATR Multiplier
+input long   InpMagic = 888888;         // Magic Number
 
 input group "=== Macro Intelligence ==="
 input bool   InpUseCalendar = true;     // Use News Filter
@@ -33,7 +34,6 @@ input bool   InpUseFVG = true;          // Use Fair Value Gaps
 CTrade trade;
 long   onnx_handle = INVALID_HANDLE;
 int    handle_atr;
-long   magic_number = 888888;
 
 // --- Structures for SMC ---
 struct OrderBlock {
@@ -62,8 +62,6 @@ int OnInit()
       }
       else
       {
-         // Assuming input shape [1, 10] (10 previous candle changes)
-         // and output shape [1, 1] (direction prediction)
          long input_shape[] = {1, 10};
          if(!OnnxSetInputShape(onnx_handle, 0, input_shape))
          {
@@ -74,7 +72,7 @@ int OnInit()
       }
    }
 
-   trade.SetExpertMagicNumber(magic_number);
+   trade.SetExpertMagicNumber(InpMagic);
    return(INIT_SUCCEEDED);
 }
 
@@ -115,12 +113,9 @@ void OnTick()
       double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
       double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
       double atr[];
-      CopyBuffer(handle_atr, 0, 0, 1, atr);
+      if(CopyBuffer(handle_atr, 0, 1, 1, atr) <= 0) return;
 
-      // BUY Criteria:
-      // - ML confirms Bullish (if used)
-      // - Price is near a Bullish Order Block (Discount)
-      // - FVG detected or passed
+      // BUY Criteria: Using index 1 (closed candle) for stability
       bool buy_signal = (ml_direction >= 0) && (last_ob.side == 1 && ask <= last_ob.price + (atr[0]*0.5));
       if(InpUseFVG) buy_signal = buy_signal && fvg_buy;
 
@@ -131,10 +126,7 @@ void OnTick()
          trade.Buy(InpLotSize, _Symbol, ask, sl, tp, "AI-SMC Buy");
       }
 
-      // SELL Criteria:
-      // - ML confirms Bearish (if used)
-      // - Price is near a Bearish Order Block (Premium)
-      // - FVG detected
+      // SELL Criteria
       bool sell_signal = (ml_direction <= 0) && (last_ob.side == -1 && bid >= last_ob.price - (atr[0]*0.5));
       if(InpUseFVG) sell_signal = sell_signal && fvg_sell;
 
@@ -154,9 +146,10 @@ bool PositionExists()
 {
    for(int i = PositionsTotal() - 1; i >= 0; i--)
    {
-      if(PositionSelectByTicket(PositionGetTicket(i)))
+      ulong ticket = PositionGetTicket(i);
+      if(PositionSelectByTicket(ticket))
       {
-         if(PositionGetInteger(POSITION_MAGIC) == magic_number && PositionGetString(POSITION_SYMBOL) == _Symbol)
+         if(PositionGetInteger(POSITION_MAGIC) == InpMagic && PositionGetString(POSITION_SYMBOL) == _Symbol)
             return true;
       }
    }
@@ -172,7 +165,6 @@ bool IsNewsTime()
    datetime from = TimeCurrent();
    datetime to = from + InpNewsPauseMin * 60;
 
-   // Check upcoming news
    if(CalendarValueHistory(values, from, to) > 0)
    {
       for(int i=0; i<ArraySize(values); i++)
@@ -185,7 +177,6 @@ bool IsNewsTime()
       }
    }
 
-   // Check recent news
    from = TimeCurrent() - InpNewsPauseMin * 60;
    to = TimeCurrent();
    if(CalendarValueHistory(values, from, to) > 0)
@@ -199,8 +190,38 @@ bool IsNewsTime()
          }
       }
    }
-
    return false;
+}
+
+//+------------------------------------------------------------------+
+//| Helper to get Close price in MQL5                                |
+//+------------------------------------------------------------------+
+double GetClose(int index)
+{
+   double close[];
+   if(CopyClose(_Symbol, _Period, index, 1, close) > 0) return close[0];
+   return 0;
+}
+
+double GetOpen(int index)
+{
+   double open[];
+   if(CopyOpen(_Symbol, _Period, index, 1, open) > 0) return open[0];
+   return 0;
+}
+
+double GetHigh(int index)
+{
+   double high[];
+   if(CopyHigh(_Symbol, _Period, index, 1, high) > 0) return high[0];
+   return 0;
+}
+
+double GetLow(int index)
+{
+   double low[];
+   if(CopyLow(_Symbol, _Period, index, 1, low) > 0) return low[0];
+   return 0;
 }
 
 //+------------------------------------------------------------------+
@@ -213,10 +234,10 @@ int GetMLPrediction()
 
    for(int i=0; i<10; i++)
    {
-      input_data[i] = (float)(iClose(_Symbol, _Period, i) - iOpen(_Symbol, _Period, i));
+      input_data[i] = (float)(GetClose(i+1) - GetOpen(i+1));
    }
 
-   if(OnnxRun(onnx_handle, ONNX_NO_LOGS, input_data, output_data))
+   if(OnnxRun(onnx_handle, ONNX_DEFAULT, input_data, output_data))
    {
       if(output_data[0] > 0.5) return 1;
       if(output_data[0] < -0.5) return -1;
@@ -230,10 +251,9 @@ int GetMLPrediction()
 void CheckFVG(bool &buy, bool &sell)
 {
    buy = false; sell = false;
-   // Bullish FVG: Bar 1 Low > Bar 3 High
-   if(iLow(_Symbol, _Period, 1) > iHigh(_Symbol, _Period, 3)) buy = true;
-   // Bearish FVG: Bar 1 High < Bar 3 Low
-   if(iHigh(_Symbol, _Period, 1) < iLow(_Symbol, _Period, 3)) sell = true;
+   // Using index 1, 2, 3 for closed candles
+   if(GetLow(1) > GetHigh(3)) buy = true;
+   if(GetHigh(1) < GetLow(3)) sell = true;
 }
 
 //+------------------------------------------------------------------+
@@ -242,23 +262,18 @@ void CheckFVG(bool &buy, bool &sell)
 void FindLastOrderBlock(OrderBlock &ob)
 {
    ob.active = false;
-   for(int i=1; i<InpOBBars; i++)
+   for(int i=2; i<InpOBBars; i++)
    {
-      // Simplistic OB: Last candle of opposite color before a break of structure
-      // Bullish OB: Last bearish candle before a strong impulsive bullish move
-      if(iClose(_Symbol, _Period, i) < iOpen(_Symbol, _Period, i) &&
-         iClose(_Symbol, _Period, i-1) > iHigh(_Symbol, _Period, i))
+      if(GetClose(i) < GetOpen(i) && GetClose(i-1) > GetHigh(i))
       {
-         ob.price = iHigh(_Symbol, _Period, i);
+         ob.price = GetHigh(i);
          ob.side = 1;
          ob.active = true;
          break;
       }
-      // Bearish OB
-      if(iClose(_Symbol, _Period, i) > iOpen(_Symbol, _Period, i) &&
-         iClose(_Symbol, _Period, i-1) < iLow(_Symbol, _Period, i))
+      if(GetClose(i) > GetOpen(i) && GetClose(i-1) < GetLow(i))
       {
-         ob.price = iLow(_Symbol, _Period, i);
+         ob.price = GetLow(i);
          ob.side = -1;
          ob.active = true;
          break;
