@@ -1,0 +1,200 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+//@version=6
+indicator("Borsellino Legendary Trader Suite", overlay = true, max_labels_count = 500)
+
+// --- Constants ---
+var string GRP_ORB    = "1. Opening Range Settings"
+var string GRP_GANN   = "2. Gann Filter Settings"
+var string GRP_REV    = "3. Reversal Filter Settings"
+var string GRP_VOL    = "4. Order Flow (Volume) Settings"
+var string GRP_RISK   = "5. Risk & Circuit Breaker"
+var string GRP_CMD    = "6. Commandments Dashboard"
+
+var color BULL_COLOR  = #089981
+var color BEAR_COLOR  = #f23645
+var color NEUT_COLOR  = #5b9cf6
+var color GANN_BULL   = #00c3ff
+var color GANN_BEAR   = #ff00ea
+var color REV_COLOR   = #ffeb3b
+var color VOL_COLOR   = #9c27b0
+
+// --- Inputs ---
+// 1. Opening Range
+int orbTimeInput      = input.int(5, "ORB Duration (Mins)", minval = 1, group = GRP_ORB)
+string sessionInput   = input.session("0930-1600", "Trading Session", group = GRP_ORB)
+
+// 2. Gann Filter
+bool useGannFilter    = input.bool(true, "Use Gann Hi-Lo Filter", group = GRP_GANN)
+int gannLength        = input.int(3, "Gann Period", minval = 1, group = GRP_GANN)
+bool showGannLines     = input.bool(true, "Show Gann Lines", group = GRP_GANN)
+
+// 3. Reversal Filter
+bool useRevFilter     = input.bool(true, "Use Reversal Confirmation", group = GRP_REV)
+int revLookback       = input.int(10, "Reversal Lookback", minval = 1, group = GRP_REV)
+
+// 4. Order Flow (Volume) Filter
+bool useVolFilter     = input.bool(true, "Use Order Flow Confirmation", group = GRP_VOL)
+int volMALength       = input.int(20, "Volume MA Length", minval = 1, group = GRP_VOL)
+float volMultiplier   = input.float(1.2, "Volume Multiplier", minval = 0.1, step = 0.1, group = GRP_VOL)
+
+// 5. Risk & Circuit Breaker
+int stopPointsInput   = input.int(600, "Stop Loss Points", minval = 1, group = GRP_RISK, tooltip = "Points relative to the entry. For ES, 1 point = 1.00 index price change.")
+int targetPointsInput = input.int(1000, "Profit Target Points", minval = 1, group = GRP_RISK)
+float pointValueInput = input.float(0.01, "Point Value", minval = 0.00001, group = GRP_RISK, tooltip = "Set to 1.0 for Index Points or 0.01 for Stocks. If levels are too far, decrease this.")
+int maxTradesInput    = input.int(5, "Max Trades Per Session", minval = 1, group = GRP_RISK)
+bool useCircuitBreaker = input.bool(true, "9th Commandment (3 Losses Stop)", group = GRP_RISK)
+
+// 6. Dashboard
+bool showCommandments = input.bool(true, "Show Commandments Table", group = GRP_CMD)
+string tablePosInput  = input.string("Bottom Right", "Table Position", options = ["Top Right", "Bottom Right", "Top Left", "Bottom Left"], group = GRP_CMD)
+
+// --- Logic ---
+var float orbHigh = na
+var float orbLow  = na
+var int totalTradesToday = 0
+var int totalLossesToday = 0
+var bool circuitBroken = false
+var int lastExitBar = 0
+
+// Detect new session
+isNewSession = time("D", sessionInput) != time("D", sessionInput)[1]
+var int sessionStartTime = 0
+
+if isNewSession
+    sessionStartTime := time
+    orbHigh := na
+    orbLow := na
+    totalTradesToday := 0
+    totalLossesToday := 0
+    circuitBroken := false
+
+// Capture Opening Range
+elapsedMinutes = (time - sessionStartTime) / 60000
+if elapsedMinutes >= 0 and elapsedMinutes < orbTimeInput
+    orbHigh := na(orbHigh) ? high : math.max(orbHigh, high)
+    orbLow  := na(orbLow) ? low : math.min(orbLow, low)
+
+// --- Gann Filter ---
+float gannH = ta.sma(high, gannLength)
+float gannL = ta.sma(low, gannLength)
+var int gannDir = 0
+if close > gannH[1]
+    gannDir := 1
+else if close < gannL[1]
+    gannDir := -1
+bool gannBullish = gannDir == 1
+bool gannBearish = gannDir == -1
+
+// --- Reversal Filter ---
+pHigh = ta.pivothigh(high, 2, 2)
+pLow  = ta.pivotlow(low, 2, 2)
+var int lastPLowBar = 0
+var int lastPHighBar = 0
+if not na(pLow)
+    lastPLowBar := bar_index
+if not na(pHigh)
+    lastPHighBar := bar_index
+bool recentRevUp   = (bar_index - lastPLowBar) <= revLookback
+bool recentRevDown = (bar_index - lastPHighBar) <= revLookback
+
+// --- Volume Filter ---
+float avgVol = ta.sma(volume, volMALength)
+bool isHighVolume = volume >= (avgVol * volMultiplier)
+
+// --- Circuit Breaker & Trade Data ---
+var float entryPrice = na
+var float currentStop = na
+var float currentTarget = na
+var int activeDir = 0
+
+if activeDir != 0
+    bool stopHit = (activeDir == 1 and low <= currentStop) or (activeDir == -1 and high >= currentStop)
+    bool targetHit = (activeDir == 1 and high >= currentTarget) or (activeDir == -1 and low <= currentTarget)
+    if stopHit
+        totalLossesToday += 1
+        activeDir := 0
+        lastExitBar := bar_index
+    else if targetHit
+        activeDir := 0
+        lastExitBar := bar_index
+
+if totalLossesToday >= 3 and useCircuitBreaker
+    circuitBroken := true
+
+// --- Entry Logic ---
+bool canTrade = activeDir == 0 and totalTradesToday < maxTradesInput and not circuitBroken and bar_index > lastExitBar
+
+bool longSignal  = ta.crossover(close, orbHigh) and canTrade and not na(orbHigh) and (not useGannFilter or gannBullish) and (not useRevFilter or recentRevUp) and (not useVolFilter or isHighVolume)
+bool shortSignal = ta.crossunder(close, orbLow) and canTrade and not na(orbLow) and (not useGannFilter or gannBearish) and (not useRevFilter or recentRevDown) and (not useVolFilter or isHighVolume)
+
+if longSignal or shortSignal
+    totalTradesToday += 1
+    activeDir     := longSignal ? 1 : -1
+    entryPrice    := longSignal ? orbHigh : orbLow
+    currentStop   := longSignal ? entryPrice - (stopPointsInput * pointValueInput) : entryPrice + (stopPointsInput * pointValueInput)
+    currentTarget := longSignal ? entryPrice + (targetPointsInput * pointValueInput) : entryPrice - (targetPointsInput * pointValueInput)
+
+if isNewSession
+    entryPrice := na
+    currentStop := na
+    currentTarget := na
+    activeDir := 0
+
+// --- Visuals ---
+pOrbH = plot(orbHigh, "ORB High", color.new(BULL_COLOR, 30), 2, plot.style_linebr)
+pOrbL = plot(orbLow, "ORB Low", color.new(BEAR_COLOR, 30), 2, plot.style_linebr)
+fill(pOrbH, pOrbL, color.new(NEUT_COLOR, 90), "ORB Zone")
+
+plot(showGannLines ? (gannBullish ? gannL : gannH) : na, "Gann Filter", gannBullish ? GANN_BULL : GANN_BEAR, 2, plot.style_linebr)
+
+// Trade Levels
+pEntry = plot(activeDir != 0 ? entryPrice : na, "Entry", color.new(NEUT_COLOR, 50), 2, plot.style_linebr)
+pTP    = plot(activeDir != 0 ? currentTarget : na, "Target", color.new(BULL_COLOR, 20), 2, plot.style_linebr)
+pSL    = plot(activeDir != 0 ? currentStop : na, "Stop", color.new(BEAR_COLOR, 20), 2, plot.style_linebr)
+
+// Simplified Fills
+fill(pEntry, pTP, color.new(BULL_COLOR, 85), "TP Zone")
+fill(pEntry, pSL, color.new(BEAR_COLOR, 85), "SL Zone")
+
+plotshape(longSignal, "BUY", shape.triangleup, location.belowbar, BULL_COLOR, 0, "BUY", chart.fg_color, size = size.small)
+plotshape(shortSignal, "SELL", shape.triangledown, location.abovebar, BEAR_COLOR, 0, "SELL", chart.fg_color, size = size.small)
+
+if longSignal
+    label.new(bar_index, currentTarget, "TP: " + str.tostring(currentTarget, format.mintick), color=BULL_COLOR, textcolor=color.white, style=label.style_label_down, size=size.small)
+    label.new(bar_index, currentStop, "SL: " + str.tostring(currentStop, format.mintick), color=BEAR_COLOR, textcolor=color.white, style=label.style_label_up, size=size.small)
+if shortSignal
+    label.new(bar_index, currentTarget, "TP: " + str.tostring(currentTarget, format.mintick), color=BULL_COLOR, textcolor=color.white, style=label.style_label_up, size=size.small)
+    label.new(bar_index, currentStop, "SL: " + str.tostring(currentStop, format.mintick), color=BEAR_COLOR, textcolor=color.white, style=label.style_label_down, size=size.small)
+
+// Dashboard
+if showCommandments and barstate.islast
+    var table cmdTable = table.new(tablePosInput == "Top Right" ? position.top_right : tablePosInput == "Bottom Right" ? position.bottom_right : tablePosInput == "Top Left" ? position.top_left : position.bottom_left, 2, 15, color.new(chart.bg_color, 10), chart.fg_color, 1, chart.fg_color, 1)
+    table.cell(cmdTable, 0, 0, "Lewis Borsellino's Suite", bgcolor = NEUT_COLOR, text_color = color.white, text_size = size.small)
+    table.merge_cells(cmdTable, 0, 0, 1, 0)
+    statusColor = circuitBroken ? BEAR_COLOR : (activeDir != 0 ? NEUT_COLOR : BULL_COLOR)
+    table.cell(cmdTable, 0, 1, "Status", bgcolor = statusColor, text_color = color.white, text_size = size.tiny)
+    table.cell(cmdTable, 1, 1, circuitBroken ? "BREAK REQUIRED" : (activeDir != 0 ? "IN TRADE" : "READY"), bgcolor = statusColor, text_color = color.white, text_size = size.tiny)
+
+    table.cell(cmdTable, 0, 2, "Stats", bgcolor = NEUT_COLOR, text_color = color.white, text_size = size.tiny)
+    table.cell(cmdTable, 1, 2, "Trades: " + str.tostring(totalTradesToday) + " | Losses: " + str.tostring(totalLossesToday), bgcolor = NEUT_COLOR, text_color = color.white, text_size = size.tiny)
+
+    table.cell(cmdTable, 0, 3, "1", text_size = size.tiny)
+    table.cell(cmdTable, 1, 3, "Trade for success, not for money", text_size = size.tiny, text_halign = text.align_left)
+    table.cell(cmdTable, 0, 4, "2", text_size = size.tiny)
+    table.cell(cmdTable, 1, 4, "Discipline is key", text_size = size.tiny, text_halign = text.align_left)
+    table.cell(cmdTable, 0, 5, "3", text_size = size.tiny)
+    table.cell(cmdTable, 1, 5, "Know yourself", text_size = size.tiny, text_halign = text.align_left)
+    table.cell(cmdTable, 0, 6, "4", text_size = size.tiny)
+    table.cell(cmdTable, 1, 6, "Lose your ego", text_size = size.tiny, text_halign = text.align_left)
+    table.cell(cmdTable, 0, 7, "5", text_size = size.tiny)
+    table.cell(cmdTable, 1, 7, "No hoping or praying", text_size = size.tiny, text_halign = text.align_left)
+    table.cell(cmdTable, 0, 8, "6", text_size = size.tiny)
+    table.cell(cmdTable, 1, 8, "Let profits run", text_size = size.tiny, text_halign = text.align_left)
+    table.cell(cmdTable, 0, 9, "7", text_size = size.tiny)
+    table.cell(cmdTable, 1, 9, "Wait for setups", text_size = size.tiny, text_halign = text.align_left)
+    table.cell(cmdTable, 0, 10, "8", text_size = size.tiny)
+    table.cell(cmdTable, 1, 10, "Love your losers", text_size = size.tiny, text_halign = text.align_left)
+    table.cell(cmdTable, 0, 11, "9", text_size = size.tiny)
+    table.cell(cmdTable, 1, 11, "3 losses, take a break", text_size = size.tiny, text_halign = text.align_left)
+    table.cell(cmdTable, 0, 12, "10", text_size = size.tiny)
+    table.cell(cmdTable, 1, 12, "Rules will break you", text_size = size.tiny, text_halign = text.align_left)
